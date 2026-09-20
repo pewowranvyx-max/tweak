@@ -20,8 +20,8 @@ if (-not $isAdmin) {
         $scriptFile = $MyInvocation.MyCommand.Path
     }
     if (-not $scriptFile -or -not (Test-Path $scriptFile)) {
-        $defaultLoc = "$env:USERPROFILE\.gemini\antigravity-ide\scratch\ranvyx-optimizer\Ranvyx.ps1"
-        if (Test-Path $defaultLoc) { $scriptFile = $defaultLoc }
+        $candidate = Join-Path (Get-Location).Path "Ranvyx.ps1"
+        if (Test-Path $candidate) { $scriptFile = $candidate }
     }
 
     Write-Host ""
@@ -38,8 +38,8 @@ if (-not $isAdmin) {
         $scriptContent = ""
         try { $scriptContent = $MyInvocation.MyCommand.ScriptBlock.ToString() } catch {}
         if (-not $scriptContent) {
-            $defaultLoc = "$env:USERPROFILE\.gemini\antigravity-ide\scratch\ranvyx-optimizer\Ranvyx.ps1"
-            if (Test-Path $defaultLoc) { $scriptContent = Get-Content $defaultLoc -Raw }
+            $candidate = Join-Path (Get-Location).Path "Ranvyx.ps1"
+            if (Test-Path $candidate) { $scriptContent = Get-Content $candidate -Raw }
         }
         if ($scriptContent) {
             [System.IO.File]::WriteAllText($tempPath, $scriptContent, [System.Text.Encoding]::UTF8)
