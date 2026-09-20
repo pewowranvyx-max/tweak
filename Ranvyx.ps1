@@ -361,6 +361,7 @@ function Start-Optimization {
                 netsh int tcp set global autotuninglevel=normal | Out-Null
                 netsh int tcp set heuristics disabled | Out-Null
                 netsh int tcp set global rss=enabled | Out-Null
+                netsh int tcp set global chimney=enabled 2>$null | Out-Null
                 netsh int tcp set global rsc=disabled 2>$null | Out-Null
                 netsh int tcp set global dca=enabled 2>$null | Out-Null
                 netsh int tcp set global netdma=enabled 2>$null | Out-Null
@@ -373,6 +374,7 @@ function Start-Optimization {
                 netsh int tcp set global pacingprofile=off 2>$null | Out-Null
                 netsh int tcp set supplemental template=custom congestionprovider=cubic 2>$null | Out-Null
                 netsh int tcp set supplemental template=custom congestionprovider=ctcp 2>$null | Out-Null
+                netsh int tcp set supplemental congestionprovider=ctcp 2>$null | Out-Null
                 netsh int tcp set supplemental template=custom minrto=300 2>$null | Out-Null
 
                 netsh int ip set global taskoffload=enabled 2>$null | Out-Null
@@ -380,7 +382,7 @@ function Start-Optimization {
                 netsh int ip set global icmpredirects=disabled 2>$null | Out-Null
                 netsh int ip set global multicastforwarding=disabled 2>$null | Out-Null
                 netsh int ipv6 set global randomizeidentifiers=disabled 2>$null | Out-Null
-                Write-RanvyxLog -Message "Tuned TCP/IP stack (autotuning=normal, rss=enabled, fastopen=enabled, ctcp/cubic, pacingprofile=off)" -Level "OPTIMIZE"
+                Write-RanvyxLog -Message "Tuned TCP/IP stack (autotuning=normal, rss=enabled, chimney=enabled, fastopen=enabled, ctcp/cubic, pacingprofile=off)" -Level "OPTIMIZE"
             }
         },
         @{
@@ -389,8 +391,9 @@ function Start-Optimization {
             Action = {
                 $afdPath = "HKLM:\SYSTEM\CurrentControlSet\Services\AFD\Parameters"
                 if (-not (Test-Path $afdPath)) { New-Item -Path $afdPath -Force | Out-Null }
-                Set-ItemProperty -Path $afdPath -Name "DefaultReceiveWindow" -Value 65536 -Type DWord -Force -ErrorAction SilentlyContinue
-                Set-ItemProperty -Path $afdPath -Name "DefaultSendWindow" -Value 65536 -Type DWord -Force -ErrorAction SilentlyContinue
+                # 256 KB socket buffer for high-bandwidth FiveM CDN texture/asset streaming
+                Set-ItemProperty -Path $afdPath -Name "DefaultReceiveWindow" -Value 262144 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $afdPath -Name "DefaultSendWindow" -Value 262144 -Type DWord -Force -ErrorAction SilentlyContinue
                 Set-ItemProperty -Path $afdPath -Name "FastSendDatagramThreshold" -Value 1024 -Type DWord -Force -ErrorAction SilentlyContinue
                 Set-ItemProperty -Path $afdPath -Name "FastCopyReceiveThreshold" -Value 1024 -Type DWord -Force -ErrorAction SilentlyContinue
                 Set-ItemProperty -Path $afdPath -Name "DoNotUseConnectData" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
@@ -399,7 +402,7 @@ function Start-Optimization {
                 Set-ItemProperty -Path $afdPath -Name "MinimumDynamicBacklog" -Value 20 -Type DWord -Force -ErrorAction SilentlyContinue
                 Set-ItemProperty -Path $afdPath -Name "MaximumDynamicBacklog" -Value 1000 -Type DWord -Force -ErrorAction SilentlyContinue
                 Set-ItemProperty -Path $afdPath -Name "DynamicBacklogGrowthDelta" -Value 10 -Type DWord -Force -ErrorAction SilentlyContinue
-                Write-RanvyxLog -Message "Optimized AFD WinSock driver (FastSendDatagramThreshold=1024, DynamicBacklog enabled, 64K windows)" -Level "OPTIMIZE"
+                Write-RanvyxLog -Message "Optimized AFD WinSock driver (DefaultReceive/SendWindow=256KB for FiveM CDN asset streaming, DynamicBacklog enabled)" -Level "OPTIMIZE"
             }
         },
         @{
@@ -429,6 +432,14 @@ function Start-Optimization {
                         Set-NetAdapterAdvancedProperty -Name $adName -DisplayName "*TCP Checksum Offload (IPv4)*" -DisplayValue "Rx & Tx Enabled" -ErrorAction SilentlyContinue 2>$null
                         Set-NetAdapterAdvancedProperty -Name $adName -DisplayName "*UDP Checksum Offload (IPv4)*" -DisplayValue "Rx & Tx Enabled" -ErrorAction SilentlyContinue 2>$null
 
+                        # Expand Hardware Descriptors / Buffers for Burst Texture & Asset Streaming (prevents packet loss & map texture loss)
+                        Set-NetAdapterAdvancedProperty -Name $adName -DisplayName "*Receive Buffers*" -DisplayValue "1024" -ErrorAction SilentlyContinue 2>$null
+                        Set-NetAdapterAdvancedProperty -Name $adName -DisplayName "*Transmit Buffers*" -DisplayValue "1024" -ErrorAction SilentlyContinue 2>$null
+                        Set-NetAdapterAdvancedProperty -Name $adName -DisplayName "*Max Rx Buffers*" -DisplayValue "1024" -ErrorAction SilentlyContinue 2>$null
+                        Set-NetAdapterAdvancedProperty -Name $adName -DisplayName "*Max Tx Buffers*" -DisplayValue "1024" -ErrorAction SilentlyContinue 2>$null
+                        Set-NetAdapterAdvancedProperty -Name $adName -DisplayName "*Num Rx Buffers*" -DisplayValue "1024" -ErrorAction SilentlyContinue 2>$null
+                        Set-NetAdapterAdvancedProperty -Name $adName -DisplayName "*Num Tx Buffers*" -DisplayValue "1024" -ErrorAction SilentlyContinue 2>$null
+
                         Enable-NetAdapterRss -Name $adName -ErrorAction SilentlyContinue 2>$null
                         Set-NetAdapterRss -Name $adName -NumberOfReceiveQueues 4 -ErrorAction SilentlyContinue 2>$null
                     }
@@ -440,7 +451,19 @@ function Start-Optimization {
                         Where-Object { $_.InstanceName -match "PCI" } |
                         Set-CimInstance -Property @{ Enable = $false } -ErrorAction SilentlyContinue
                 } catch {}
-                Write-RanvyxLog -Message "Optimized Network Adapters (disabled EEE/Green, disabled Interrupt Moderation & LSO, enabled RSS 4 queues)" -Level "OPTIMIZE"
+
+                # Wi-Fi / WLAN AutoConfig & Adapter Optimization (from FastPain2)
+                try {
+                    Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" -and ($_.InterfaceDescription -match "Wi-Fi|Wireless|802.11" -or $_.Name -match "Wi-Fi|Wireless") } | ForEach-Object {
+                        $wifiName = $_.Name
+                        netsh wlan set autoconfig enabled=yes interface="$wifiName" 2>$null | Out-Null
+                        Set-NetAdapterAdvancedProperty -Name $wifiName -DisplayName "*Roaming Aggressiveness*" -DisplayValue "1. Lowest" -ErrorAction SilentlyContinue 2>$null
+                        Set-NetAdapterAdvancedProperty -Name $wifiName -DisplayName "*Packet Coalescing*" -DisplayValue "Disabled" -ErrorAction SilentlyContinue 2>$null
+                        Set-NetAdapterAdvancedProperty -Name $wifiName -DisplayName "*Throughput Booster*" -DisplayValue "Enabled" -ErrorAction SilentlyContinue 2>$null
+                    }
+                } catch {}
+
+                Write-RanvyxLog -Message "Optimized Network Adapters (disabled EEE/Green/Interrupt Moderation/LSO, expanded buffers 1024, enabled RSS 4 queues, WLAN autoconfig)" -Level "OPTIMIZE"
             }
         },
         @{
@@ -478,12 +501,17 @@ function Start-Optimization {
                     Set-ItemProperty -Path $tcpipParams -Name "ArpCacheLife" -Value 86400 -Type DWord -Force -ErrorAction SilentlyContinue
                     Set-ItemProperty -Path $tcpipParams -Name "ArpCacheMinReferencedLife" -Value 180 -Type DWord -Force -ErrorAction SilentlyContinue
                     
+                    # Selective Acknowledgment & Fast Retransmit for CDN texture streaming
+                    Set-ItemProperty -Path $tcpipParams -Name "SackOpts" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                    Set-ItemProperty -Path $tcpipParams -Name "TcpMaxDupAcks" -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
+                    Set-ItemProperty -Path $tcpipParams -Name "TcpMaxDataRetransmissions" -Value 3 -Type DWord -Force -ErrorAction SilentlyContinue
+
                     $cpuCount = [Environment]::ProcessorCount
                     if ($cpuCount -gt 0) {
                         Set-ItemProperty -Path $tcpipParams -Name "NumTcbTablePartitions" -Value $cpuCount -Type DWord -Force -ErrorAction SilentlyContinue
                     }
                 }
-                Write-RanvyxLog -Message "Disabled Nagle's Algorithm (TcpAckFrequency=1, TCPNoDelay=1, MaxUserPort=65534, TcpTimedWaitDelay=30, TcbPartitions)" -Level "OPTIMIZE"
+                Write-RanvyxLog -Message "Disabled Nagle's Algorithm (TcpAckFrequency=1, TCPNoDelay=1, SackOpts=1, TcpMaxDupAcks=2, MaxUserPort=65534, TcpTimedWaitDelay=30)" -Level "OPTIMIZE"
             }
         },
         @{
@@ -523,8 +551,46 @@ function Start-Optimization {
             }
         },
         @{
+            Name = "FiveM High-Speed Asset Streaming & QoS DSCP 46"
+            TargetPct = 58
+            Action = {
+                # 1. High Priority QoS DSCP 46 (Expedited Forwarding) for FiveM & GTA5 Network Traffic
+                $qosBasePath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\QoS"
+                if (-not (Test-Path $qosBasePath)) { New-Item -Path $qosBasePath -Force | Out-Null }
+
+                $fivemApps = @("FiveM_GTAProcess.exe", "FiveM.exe", "GTA5.exe", "FiveM_ChromeBrowser.exe", "CitizenFX.exe")
+                foreach ($app in $fivemApps) {
+                    $ruleName = "FiveM_QoS_$($app.Replace('.exe', ''))"
+                    $rulePath = Join-Path $qosBasePath $ruleName
+                    if (-not (Test-Path $rulePath)) { New-Item -Path $rulePath -Force | Out-Null }
+                    Set-ItemProperty -Path $rulePath -Name "Version" -Value "1.0" -Type String -Force -ErrorAction SilentlyContinue
+                    Set-ItemProperty -Path $rulePath -Name "Application Name" -Value $app -Type String -Force -ErrorAction SilentlyContinue
+                    Set-ItemProperty -Path $rulePath -Name "Protocol" -Value "*" -Type String -Force -ErrorAction SilentlyContinue
+                    Set-ItemProperty -Path $rulePath -Name "Local Port" -Value "*" -Type String -Force -ErrorAction SilentlyContinue
+                    Set-ItemProperty -Path $rulePath -Name "Local IP" -Value "*" -Type String -Force -ErrorAction SilentlyContinue
+                    Set-ItemProperty -Path $rulePath -Name "Local IP Prefix Length" -Value "*" -Type String -Force -ErrorAction SilentlyContinue
+                    Set-ItemProperty -Path $rulePath -Name "Remote Port" -Value "*" -Type String -Force -ErrorAction SilentlyContinue
+                    Set-ItemProperty -Path $rulePath -Name "Remote IP" -Value "*" -Type String -Force -ErrorAction SilentlyContinue
+                    Set-ItemProperty -Path $rulePath -Name "Remote IP Prefix Length" -Value "*" -Type String -Force -ErrorAction SilentlyContinue
+                    Set-ItemProperty -Path $rulePath -Name "DSCP Value" -Value "46" -Type String -Force -ErrorAction SilentlyContinue
+                    Set-ItemProperty -Path $rulePath -Name "Throttle Rate" -Value "-1" -Type String -Force -ErrorAction SilentlyContinue
+                }
+
+                # 2. FiveM & GTA Process I/O & CPU Execution Priorities (Directly accelerates asset/texture decoding into RAM/VRAM)
+                $ifeoTargets = @("FiveM_GTAProcess.exe", "FiveM.exe", "GTA5.exe")
+                foreach ($proc in $ifeoTargets) {
+                    $perfPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$proc\PerfOptions"
+                    if (-not (Test-Path $perfPath)) { New-Item -Path $perfPath -Force | Out-Null }
+                    Set-ItemProperty -Path $perfPath -Name "CpuPriorityClass" -Value 3 -Type DWord -Force -ErrorAction SilentlyContinue
+                    Set-ItemProperty -Path $perfPath -Name "IoPriority" -Value 3 -Type DWord -Force -ErrorAction SilentlyContinue
+                }
+
+                Write-RanvyxLog -Message "Configured FiveM High-Speed Streaming (QoS DSCP 46 Expedited Forwarding, IFEO High CPU/IO Priority)" -Level "OPTIMIZE"
+            }
+        },
+        @{
             Name = "GPU Scheduling, DirectDraw & DWM Latency"
-            TargetPct = 60
+            TargetPct = 66
             Action = {
                 # Hardware-Accelerated GPU Scheduling (HAGS Mode 2)
                 $gfxPath = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
@@ -563,7 +629,7 @@ function Start-Optimization {
         },
         @{
             Name = "MMCSS Gaming & Audio Latency Priorities"
-            TargetPct = 70
+            TargetPct = 74
             Action = {
                 # MMCSS Games Task
                 $gamesTask = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"
@@ -593,7 +659,7 @@ function Start-Optimization {
         },
         @{
             Name = "Raw Input, Mouse 1:1 Response & Keyboard Buffers"
-            TargetPct = 78
+            TargetPct = 80
             Action = {
                 # Increase Mouse and Keyboard Hardware Queue buffers (handles high polling rate 1000Hz - 8000Hz without dropped inputs)
                 $mouPath = "HKLM:\SYSTEM\CurrentControlSet\Services\mouclass\Parameters"
@@ -618,7 +684,7 @@ function Start-Optimization {
         },
         @{
             Name = "CPU Priority Separation, SvcHost & Storage Latency"
-            TargetPct = 85
+            TargetPct = 87
             Action = {
                 # Win32PrioritySeparation = 0x26 (38 Dec) - Optimal 3:1 Foreground Quantum for Pro Gaming responsiveness
                 $priorityControl = "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl"
@@ -655,7 +721,7 @@ function Start-Optimization {
         },
         @{
             Name = "CPU Unparking, Power Plan & Timer Tuning"
-            TargetPct = 92
+            TargetPct = 93
             Action = {
                 # Activate Ultimate or High Performance Power Plan
                 try {
@@ -976,12 +1042,14 @@ function Start-Reset {
         netsh winsock reset | Out-Null
         netsh int tcp set global autotuninglevel=normal | Out-Null
         netsh int tcp set global rss=enabled | Out-Null
+        netsh int tcp set global chimney=default 2>$null | Out-Null
         netsh int tcp set heuristics default 2>$null | Out-Null
         netsh int tcp set global fastopen=default 2>$null | Out-Null
         netsh int tcp set global timestamps=default 2>$null | Out-Null
         netsh int tcp set global initialRto=default 2>$null | Out-Null
         netsh int tcp set global pacingprofile=default 2>$null | Out-Null
         netsh int tcp set supplemental template=custom congestionprovider=default 2>$null | Out-Null
+        netsh int tcp set supplemental congestionprovider=default 2>$null | Out-Null
 
         # Remove custom AFD WinSock parameters
         $afdParams = "HKLM:\SYSTEM\CurrentControlSet\Services\AFD\Parameters"
@@ -1004,6 +1072,14 @@ function Start-Reset {
                 Set-NetAdapterAdvancedProperty -Name $adName -DisplayName "*Flow Control*" -DisplayValue "Rx & Tx Enabled" -ErrorAction SilentlyContinue 2>$null
                 Set-NetAdapterAdvancedProperty -Name $adName -DisplayName "*Large Send Offload v2 (IPv4)*" -DisplayValue "Enabled" -ErrorAction SilentlyContinue 2>$null
                 Set-NetAdapterAdvancedProperty -Name $adName -DisplayName "*Large Send Offload v2 (IPv6)*" -DisplayValue "Enabled" -ErrorAction SilentlyContinue 2>$null
+
+                # Restore Network Adapter Buffer defaults
+                Set-NetAdapterAdvancedProperty -Name $adName -DisplayName "*Receive Buffers*" -DisplayValue "256" -ErrorAction SilentlyContinue 2>$null
+                Set-NetAdapterAdvancedProperty -Name $adName -DisplayName "*Transmit Buffers*" -DisplayValue "256" -ErrorAction SilentlyContinue 2>$null
+                Set-NetAdapterAdvancedProperty -Name $adName -DisplayName "*Max Rx Buffers*" -DisplayValue "256" -ErrorAction SilentlyContinue 2>$null
+                Set-NetAdapterAdvancedProperty -Name $adName -DisplayName "*Max Tx Buffers*" -DisplayValue "256" -ErrorAction SilentlyContinue 2>$null
+                Set-NetAdapterAdvancedProperty -Name $adName -DisplayName "*Num Rx Buffers*" -DisplayValue "256" -ErrorAction SilentlyContinue 2>$null
+                Set-NetAdapterAdvancedProperty -Name $adName -DisplayName "*Num Tx Buffers*" -DisplayValue "256" -ErrorAction SilentlyContinue 2>$null
             }
         } catch {}
 
@@ -1035,7 +1111,7 @@ function Start-Reset {
                 "DefaultTTL", "EnableICMPRedirect", "SynAttackProtect", "Tcp1323Opts", "EnableDCA", "EnableWsd",
                 "MaxUserPort", "TcpTimedWaitDelay", "MaxFreeTcbs", "MaxHashTableSize", "NumTcbTablePartitions",
                 "DisableTaskOffload", "EnableIPAutoConfiguration", "EnablePMTUDiscovery", "EnablePMTUBHDetect",
-                "ArpCacheLife", "ArpCacheMinReferencedLife"
+                "ArpCacheLife", "ArpCacheMinReferencedLife", "SackOpts", "TcpMaxDupAcks", "TcpMaxDataRetransmissions"
             )
             foreach ($p in $tcpProps) {
                 Remove-ItemProperty -Path $tcpipParams -Name $p -Force -ErrorAction SilentlyContinue
@@ -1106,6 +1182,10 @@ function Start-Reset {
         # Remove IFEO dwm.exe & csrss.exe PerfOptions
         Remove-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\dwm.exe\PerfOptions" -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\csrss.exe\PerfOptions" -Recurse -Force -ErrorAction SilentlyContinue
+        # Remove IFEO FiveM & GTA5 PerfOptions
+        Remove-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\FiveM_GTAProcess.exe\PerfOptions" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\FiveM.exe\PerfOptions" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\GTA5.exe\PerfOptions" -Recurse -Force -ErrorAction SilentlyContinue
 
         # Restore Mouse & Keyboard Queue sizes and speed
         Remove-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\mouclass\Parameters" -Name "MouseDataQueueSize" -Force -ErrorAction SilentlyContinue
@@ -1160,6 +1240,14 @@ function Start-Reset {
         Remove-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "NoAutoRebootWithLoggedOnUsers" -Force -ErrorAction SilentlyContinue
         Remove-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet" -Name "SubmitSamplesConsent" -Force -ErrorAction SilentlyContinue
         Remove-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance" -Name "fAllowToGetHelp" -Force -ErrorAction SilentlyContinue
+
+        # Clean FiveM QoS Policies
+        $qosBasePath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\QoS"
+        if (Test-Path $qosBasePath) {
+            Get-ChildItem -Path $qosBasePath -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -like "FiveM_*" } | ForEach-Object {
+                Remove-Item -Path $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
 
         # Clean All GPEDIT System, Privacy & Gaming Policies
         Remove-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR" -Name "AllowGameDVR" -Force -ErrorAction SilentlyContinue
